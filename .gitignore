@@ -1,0 +1,30 @@
+# Build directories
+Build/
+bin/
+lib/
+out/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# CMake
+CMakeSettings.json
+
+# Temporary files & Logs
+debug_*.txt
+*.log
+*.tmp
+
+# Binary artifacts
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+*.idb
+*.ilk
