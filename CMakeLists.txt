@@ -23,6 +23,12 @@ file(GLOB_RECURSE SOURCES
     "Source/*.cpp" 
     "Source/*.h"
 )
+list(APPEND SOURCES
+    "Source/Runtime/Scene/Scene.cpp"
+    "Source/Runtime/Scene/Entity.cpp"
+    "Source/Editor/EditorCamera.cpp"
+    "Source/Editor/EditorCamera.h"
+)
 
 # --- Executable ---
 # Added WIN32 to support wWinMain

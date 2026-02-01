@@ -7,121 +7,59 @@
 
 namespace Forge {
 
+EditorUI::EditorUI() = default;
+EditorUI::~EditorUI() = default;
+
+void EditorUI::SetActiveScene(std::shared_ptr<Scene> scene) {
+  m_ActiveScene = scene;
+}
+
 void EditorUI::Initialize(void *windowHandle, ID3D12Device *device,
                           int numFrames, DXGI_FORMAT rtvFormat,
                           ID3D12DescriptorHeap *srvHeap,
                           D3D12_CPU_DESCRIPTOR_HANDLE fontSrvCpu,
                           D3D12_GPU_DESCRIPTOR_HANDLE fontSrvGpu) {
-  std::cout << "[EditorUI] Initializing Context..." << std::endl;
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO &io = ImGui::GetIO();
-  (void)io;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
   ImGui::StyleColorsDark();
 
-  ImGuiStyle &style = ImGui::GetStyle();
-  if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
-    style.WindowRounding = 0.0f;
-    style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-  }
+  ImGui_ImplWin32_Init(windowHandle);
+  ImGui_ImplDX12_Init(device, numFrames, rtvFormat, srvHeap, fontSrvCpu,
+                      fontSrvGpu);
 
-  // Initialize Win32
-  if (!ImGui_ImplWin32_Init(windowHandle)) {
-    std::cerr << "[EditorUI] Critical Error: Failed to initialize ImGui Win32 "
-                 "Backend!"
-              << std::endl;
-    MessageBox(nullptr, L"Failed to initialize ImGui Win32 Backend!", L"Error",
-               MB_OK | MB_ICONERROR);
-    return;
-  }
-
-  // Initialize DX12
-  if (!ImGui_ImplDX12_Init(device, numFrames, rtvFormat, srvHeap, fontSrvCpu,
-                           fontSrvGpu)) {
-    std::cerr
-        << "[EditorUI] Critical Error: Failed to initialize ImGui DX12 Backend!"
-        << std::endl;
-    MessageBox(nullptr, L"Failed to initialize ImGui DX12 Backend!", L"Error",
-               MB_OK | MB_ICONERROR);
-    return;
-  }
-
-  std::cout << "[EditorUI] Manually creating Device Objects..." << std::endl;
-  if (!ImGui_ImplDX12_CreateDeviceObjects()) {
-    std::cerr
-        << "[EditorUI] Critical Error: Failed to create ImGui Device Objects!"
-        << std::endl;
-    MessageBox(
-        nullptr,
-        L"Failed to create ImGui Device Objects! (Check d3dcompiler_47.dll)",
-        L"Error", MB_OK | MB_ICONERROR);
-    return;
-  }
-
-  // Force Font Build
+  // Fix: Re-enable RendererHasTextures and build font atlas
+  io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
   unsigned char *pixels;
   int width, height;
   io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
 
-  std::cout << "[EditorUI] Font Atlas Info: " << width << "x" << height
-            << std::endl;
-  std::cout << "[EditorUI] TexID before check: "
-            << (void *)io.Fonts->TexID.GetTexID() << std::endl;
-
-  if (io.Fonts->TexID.GetTexID() == 0) {
-    std::cerr
-        << "[EditorUI] WARNING: Font Texture ID is NULL. ImGui will crash."
-        << std::endl;
-    std::cerr << "[EditorUI] Applying HACK: Setting Dummy Texture ID."
-              << std::endl;
-    // HACK: Set to GPU handle ptr to pretend we have a texture.
-    io.Fonts->TexID = ImTextureRef((ImTextureID)fontSrvGpu.ptr);
-
-    if (io.Fonts->TexID.GetTexID() == 0) {
-      // If GPU handle is 0 (impossible for shader visible heap?), force
-      // non-zero
-      io.Fonts->TexID = ImTextureRef((ImTextureID)0x1);
-    }
-  }
-
-  std::cout << "[EditorUI] ImGui Initialized Successfully. Final TexID: "
-            << (void *)io.Fonts->TexID.GetTexID() << std::endl;
+  // Initialize isolated Scene View Renderer
+  m_SceneViewRenderer.Initialize(device, srvHeap);
 }
 
 void EditorUI::Shutdown() {
+  m_SceneViewRenderer.Shutdown();
   ImGui_ImplDX12_Shutdown();
   ImGui_ImplWin32_Shutdown();
   ImGui::DestroyContext();
 }
 
 void EditorUI::NewFrame() {
-  ImGuiIO &io = ImGui::GetIO();
-
-  std::cout << "[EditorUI] Calling ImGui_ImplDX12_NewFrame()..." << std::endl;
   ImGui_ImplDX12_NewFrame();
-
-  std::cout << "[EditorUI] Calling ImGui_ImplWin32_NewFrame()..." << std::endl;
   ImGui_ImplWin32_NewFrame();
-
-  std::cout << "[EditorUI] Pre-NewFrame Check:" << std::endl;
-  std::cout << "   TexID: " << (void *)io.Fonts->TexID.GetTexID() << std::endl;
-
-  if (io.Fonts->TexID.GetTexID() == 0) {
-    std::cout << "[EditorUI] EMERGENCY: TexID lost! Restoring..." << std::endl;
-    io.Fonts->TexID = ImTextureRef((ImTextureID)0x1);
-  }
-
-  std::cout << "[EditorUI] Calling ImGui::NewFrame()..." << std::endl;
   ImGui::NewFrame();
-
-  std::cout << "[EditorUI] NewFrame() Complete." << std::endl;
 }
 
 void EditorUI::Draw(ID3D12GraphicsCommandList *commandList) {
+  // Render Scene View (isolated from UI) - PHASE 2: pass camera
+  m_SceneViewRenderer.Render(commandList, &m_EditorCamera);
+
+  // Draw Editor UI panels
   DrawDockSpace();
   DrawHierarchy();
   DrawInspector();
@@ -134,105 +72,92 @@ void EditorUI::Draw(ID3D12GraphicsCommandList *commandList) {
 void EditorUI::Render(ID3D12GraphicsCommandList *commandList) {
   ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList);
 
-  if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+  ImGuiIO &io = ImGui::GetIO();
+  if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
     ImGui::UpdatePlatformWindows();
     ImGui::RenderPlatformWindowsDefault(nullptr, (void *)commandList);
   }
 }
 
 void EditorUI::DrawDockSpace() {
-  static bool opt_fullscreen = true;
-  static bool opt_padding = false;
-  static ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_None;
-  static bool request_reset_layout = false;
-
-  ImGuiWindowFlags window_flags =
+  ImGuiWindowFlags windowFlags =
       ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
-  if (opt_fullscreen) {
-    const ImGuiViewport *viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::SetNextWindowViewport(viewport->ID);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-    window_flags |=
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
-  } else {
-    dockspace_flags &= ~ImGuiDockNodeFlags_PassthruCentralNode;
+  const ImGuiViewport *viewport = ImGui::GetMainViewport();
+
+  ImGui::SetNextWindowPos(viewport->WorkPos);
+  ImGui::SetNextWindowSize(viewport->WorkSize);
+  ImGui::SetNextWindowViewport(viewport->ID);
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  windowFlags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+  windowFlags |=
+      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::Begin("DockSpace", nullptr, windowFlags);
+  ImGui::PopStyleVar(3);
+
+  ImGuiID dockSpaceId = ImGui::GetID("MainDockSpace");
+
+  static bool firstTime = true;
+  if (firstTime) {
+    firstTime = false;
+    ImGui::DockBuilderRemoveNode(dockSpaceId);
+    ImGui::DockBuilderAddNode(dockSpaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockSpaceId, viewport->WorkSize);
+
+    ImGuiID dockMain = dockSpaceId;
+    ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,
+                                                   0.15f, nullptr, &dockMain);
+    ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right,
+                                                    0.20f, nullptr, &dockMain);
+    ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,
+                                                     0.25f, nullptr, &dockMain);
+
+    ImGui::DockBuilderDockWindow("Hierarchy", dockLeft);
+    ImGui::DockBuilderDockWindow("Viewport", dockMain);
+    ImGui::DockBuilderDockWindow("Inspector", dockRight);
+    ImGui::DockBuilderDockWindow("Content Browser", dockBottom);
+
+    ImGui::DockBuilderFinish(dockSpaceId);
   }
 
-  if (dockspace_flags & ImGuiDockNodeFlags_PassthruCentralNode)
-    window_flags |= ImGuiWindowFlags_NoBackground;
+  ImGui::DockSpace(dockSpaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
 
-  if (!opt_padding)
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-
-  ImGui::Begin("DockSpace Demo", nullptr, window_flags);
-
-  if (!opt_padding)
-    ImGui::PopStyleVar();
-
-  if (opt_fullscreen)
-    ImGui::PopStyleVar(2);
-
-  // Submit the DockSpace
-  ImGuiIO &io = ImGui::GetIO();
-  if (io.ConfigFlags & ImGuiConfigFlags_DockingEnable) {
-    ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
-
-    static bool first_time = true;
-    if (first_time || request_reset_layout) {
-      first_time = false;
-      request_reset_layout = false;
-
-      // Force cleanup if reset requested
-      if (ImGui::DockBuilderGetNode(dockspace_id)) {
-        ImGui::DockBuilderRemoveNode(dockspace_id);
-      }
-
-      ImGui::DockBuilderAddNode(dockspace_id,
-                                dockspace_flags | ImGuiDockNodeFlags_DockSpace);
-      ImGui::DockBuilderSetNodeSize(dockspace_id,
-                                    ImGui::GetMainViewport()->Size);
-
-      ImGuiID dock_main_id = dockspace_id;
-      ImGuiID dock_id_hierarchy = ImGui::DockBuilderSplitNode(
-          dock_main_id, ImGuiDir_Left, 0.20f, nullptr, &dock_main_id);
-      ImGuiID dock_id_inspector = ImGui::DockBuilderSplitNode(
-          dock_main_id, ImGuiDir_Right, 0.25f, nullptr, &dock_main_id);
-      ImGuiID dock_id_content = ImGui::DockBuilderSplitNode(
-          dock_main_id, ImGuiDir_Down, 0.30f, nullptr, &dock_main_id);
-      ImGuiID dock_id_viewport = dock_main_id;
-
-      ImGui::DockBuilderDockWindow("Hierarchy", dock_id_hierarchy);
-      ImGui::DockBuilderDockWindow("Inspector", dock_id_inspector);
-      ImGui::DockBuilderDockWindow("Content Browser", dock_id_content);
-      ImGui::DockBuilderDockWindow("Viewport", dock_id_viewport);
-
-      ImGui::DockBuilderFinish(dockspace_id);
-    }
-  }
-
+  // Menu Bar
   if (ImGui::BeginMenuBar()) {
     if (ImGui::BeginMenu("File")) {
-      if (ImGui::MenuItem("Exit")) {
+      if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
+      }
+      if (ImGui::MenuItem("Open Scene", "Ctrl+O")) {
+      }
+      if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Exit", "Alt+F4")) {
         PostQuitMessage(0);
       }
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
-      ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Window")) {
-      if (ImGui::MenuItem("Reset Layout")) {
-        request_reset_layout = true;
+      if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
+      }
+      if (ImGui::MenuItem("Redo", "Ctrl+Y")) {
       }
       ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Window")) {
+      ImGui::MenuItem("Hierarchy");
+      ImGui::MenuItem("Inspector");
+      ImGui::MenuItem("Content Browser");
+      ImGui::MenuItem("Viewport");
+      ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Help")) {
+      if (ImGui::MenuItem("About")) {
+      }
       ImGui::EndMenu();
     }
     ImGui::EndMenuBar();
@@ -244,129 +169,121 @@ void EditorUI::DrawDockSpace() {
 void EditorUI::DrawHierarchy() {
   ImGui::Begin("Hierarchy");
 
-  // Search Bar
-  static char searchBuffer[128] = "";
-  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-  ImGui::InputTextWithHint("##Search", "Search...", searchBuffer,
-                           IM_ARRAYSIZE(searchBuffer));
-  ImGui::Separator();
-
-  // Tree Nodes
-  static int selected = -1;
-  const char *items[] = {
-      "Main Camera", "Directional Light", "Player",         "Character Model",
-      "Weapon",      "Environment",       "Terrain",        "Trees",
-      "Buildings",   "UI Canvas",         "TestAgentEntity"};
-
-  ImGuiTreeNodeFlags base_flags = ImGuiTreeNodeFlags_OpenOnArrow |
-                                  ImGuiTreeNodeFlags_OpenOnDoubleClick |
-                                  ImGuiTreeNodeFlags_SpanAvailWidth;
-
-  for (int i = 0; i < IM_ARRAYSIZE(items); i++) {
-    ImGuiTreeNodeFlags node_flags = base_flags;
-    if (selected == i)
-      node_flags |= ImGuiTreeNodeFlags_Selected;
-
-    // Simulate some hierarchy for the reference look
-    if (i == 3) { // Character Model under Player
-      ImGui::Indent();
-      ImGui::TreeNodeEx((void *)(intptr_t)i,
-                        node_flags | ImGuiTreeNodeFlags_Leaf |
-                            ImGuiTreeNodeFlags_NoTreePushOnOpen,
-                        items[i]);
-      if (ImGui::IsItemClicked())
-        selected = i;
-      ImGui::Unindent();
-    } else {
-      bool is_leaf = true;
-      if (i == 2)
-        is_leaf = false; // Player has children
-
-      if (is_leaf) {
-        node_flags |=
-            ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-        ImGui::TreeNodeEx((void *)(intptr_t)i, node_flags, items[i]);
-        if (ImGui::IsItemClicked())
-          selected = i;
-      } else {
-        bool open = ImGui::TreeNodeEx(
-            (void *)(intptr_t)i, node_flags | ImGuiTreeNodeFlags_DefaultOpen,
-            items[i]);
-        if (ImGui::IsItemClicked())
-          selected = i;
-        if (open) {
-          // Children rendered in loop (simulated above) or here
-          ImGui::TreePop();
-        }
-      }
+  if (ImGui::Button("Create Empty")) {
+    if (m_ActiveScene) {
+      m_ActiveScene->CreateEntity();
     }
   }
+
+  ImGui::Separator();
+
+  if (m_ActiveScene) {
+    for (Entity *entity : m_ActiveScene->GetRootEntities()) {
+      DrawEntityNode(entity);
+    }
+  }
+
+  // Deselect on empty space click
+  if (ImGui::IsMouseDown(0) && ImGui::IsWindowHovered()) {
+    m_SelectedEntity = nullptr;
+  }
+
   ImGui::End();
 }
 
-void DrawVec3Control(const char *label, float *values, float resetValue = 0.0f,
-                     float columnWidth = 100.0f) {
-  ImGui::PushID(label);
+void EditorUI::DrawEntityNode(Entity *entity) {
+  if (!entity)
+    return;
 
-  ImGui::Columns(2);
-  ImGui::SetColumnWidth(0, columnWidth);
-  ImGui::Text(label);
-  ImGui::NextColumn();
+  ImGuiTreeNodeFlags flags =
+      ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
 
-  float fullWidth = ImGui::CalcItemWidth();
-  float itemWidth = fullWidth / 3.0f;
+  bool hasChildren = !entity->GetChildren().empty();
+  if (!hasChildren) {
+    flags |= ImGuiTreeNodeFlags_Leaf;
+  }
 
-  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
+  if (m_SelectedEntity == entity) {
+    flags |= ImGuiTreeNodeFlags_Selected;
+  }
 
-  float lineHeight =
-      ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f;
-  ImVec2 buttonSize = {lineHeight + 3.0f, lineHeight};
+  // Renaming Mode
+  bool isRenaming = (m_RenamingEntity == entity);
 
-  // X
-  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.8f, 0.1f, 0.15f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.9f, 0.2f, 0.2f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0.8f, 0.1f, 0.15f, 1.0f});
-  if (ImGui::Button("X", buttonSize))
-    values[0] = resetValue;
-  ImGui::PopStyleColor(3);
+  ImGui::PushID((int)entity->GetID());
 
-  ImGui::SameLine();
-  ImGui::PushItemWidth(itemWidth - buttonSize.x);
-  ImGui::DragFloat("##X", &values[0], 0.1f, 0.0f, 0.0f, "%.2f");
-  ImGui::PopItemWidth();
-  ImGui::SameLine();
+  if (isRenaming) {
+    static char renameBuf[128];
+    if (ImGui::IsWindowAppearing()) {
+      strncpy_s(renameBuf, entity->GetName().c_str(), sizeof(renameBuf));
+    }
+    ImGui::SetKeyboardFocusHere();
+    if (ImGui::InputText("##Rename", renameBuf, sizeof(renameBuf),
+                         ImGuiInputTextFlags_EnterReturnsTrue |
+                             ImGuiInputTextFlags_AutoSelectAll)) {
+      entity->SetName(renameBuf);
+      m_RenamingEntity = nullptr;
+    }
+    if (!ImGui::IsItemActive() && ImGui::IsMouseClicked(0)) {
+      m_RenamingEntity = nullptr;
+    }
+  } else {
+    bool opened = ImGui::TreeNodeEx(entity->GetName().c_str(), flags);
 
-  // Y
-  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.2f, 0.7f, 0.2f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.3f, 0.8f, 0.3f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0.2f, 0.7f, 0.2f, 1.0f});
-  if (ImGui::Button("Y", buttonSize))
-    values[1] = resetValue;
-  ImGui::PopStyleColor(3);
+    // Selection
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+      m_SelectedEntity = entity;
+    }
 
-  ImGui::SameLine();
-  ImGui::PushItemWidth(itemWidth - buttonSize.x);
-  ImGui::DragFloat("##Y", &values[1], 0.1f, 0.0f, 0.0f, "%.2f");
-  ImGui::PopItemWidth();
-  ImGui::SameLine();
+    // Double Click -> Rename
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+      m_RenamingEntity = entity;
+    }
 
-  // Z
-  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0.1f, 0.25f, 0.8f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                        ImVec4{0.2f, 0.35f, 0.9f, 1.0f});
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0.1f, 0.25f, 0.8f, 1.0f});
-  if (ImGui::Button("Z", buttonSize))
-    values[2] = resetValue;
-  ImGui::PopStyleColor(3);
+    // Context Menu
+    if (ImGui::BeginPopupContextItem()) {
+      if (ImGui::MenuItem("Rename")) {
+        m_RenamingEntity = entity;
+      }
+      if (ImGui::MenuItem("Delete")) {
+        if (m_ActiveScene) {
+          if (m_SelectedEntity == entity) {
+            m_SelectedEntity = nullptr;
+          }
+          m_ActiveScene->DestroyEntity(entity);
+          ImGui::EndPopup();
+          ImGui::PopID();
+          if (opened)
+            ImGui::TreePop();
+          return;
+        }
+      }
+      ImGui::EndPopup();
+    }
 
-  ImGui::SameLine();
-  ImGui::PushItemWidth(itemWidth - buttonSize.x);
-  ImGui::DragFloat("##Z", &values[2], 0.1f, 0.0f, 0.0f, "%.2f");
-  ImGui::PopItemWidth();
+    // F2 to Rename
+    if (m_SelectedEntity == entity && ImGui::IsKeyPressed(ImGuiKey_F2)) {
+      m_RenamingEntity = entity;
+    }
+    // Delete Key
+    if (m_SelectedEntity == entity && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+      if (m_ActiveScene) {
+        m_ActiveScene->DestroyEntity(entity);
+        m_SelectedEntity = nullptr;
+        ImGui::PopID();
+        if (opened)
+          ImGui::TreePop();
+        return;
+      }
+    }
 
-  ImGui::PopStyleVar();
-
-  ImGui::Columns(1);
+    if (opened) {
+      for (Entity *child : entity->GetChildren()) {
+        DrawEntityNode(child);
+      }
+      ImGui::TreePop();
+    }
+  }
 
   ImGui::PopID();
 }
@@ -374,44 +291,25 @@ void DrawVec3Control(const char *label, float *values, float resetValue = 0.0f,
 void EditorUI::DrawInspector() {
   ImGui::Begin("Inspector");
 
-  // Header
-  static bool active = true;
-  ImGui::Checkbox("##Active", &active);
-  ImGui::SameLine();
-  static char nameBuf[128] = "Directional Light";
-  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
-  ImGui::InputText("##Name", nameBuf, IM_ARRAYSIZE(nameBuf));
+  if (m_SelectedEntity) {
+    // Name
+    char nameBuf[128];
+    strncpy_s(nameBuf, m_SelectedEntity->GetName().c_str(), sizeof(nameBuf));
+    if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+      m_SelectedEntity->SetName(nameBuf);
+    }
 
-  ImGui::Text("Tag");
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(100);
-  if (ImGui::BeginCombo("##Tag", "Untagged")) {
-    ImGui::EndCombo();
-  }
-  ImGui::SameLine();
-  ImGui::Text("Layer");
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(100);
-  if (ImGui::BeginCombo("##Layer", "Default")) {
-    ImGui::EndCombo();
-  }
+    ImGui::Separator();
 
-  ImGui::Separator();
-
-  // Transform Component
-  if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-    static float pos[3] = {0.0f, 0.0f, 0.0f};
-    static float rot[3] = {0.0f, 0.0f, 0.0f};
-    static float scale[3] = {1.0f, 1.0f, 1.0f};
-
-    DrawVec3Control("Position", pos);
-    DrawVec3Control("Rotation", rot);
-    DrawVec3Control("Scale", scale, 1.0f);
-  }
-
-  ImGui::Separator();
-  if (ImGui::Button("Add Component", ImVec2(-1, 0))) {
-    // TODO: Open popup
+    // Transform
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+      TransformComponent &transform = m_SelectedEntity->GetTransform();
+      ImGui::DragFloat3("Position", &transform.Position.x, 0.1f);
+      ImGui::DragFloat3("Rotation", &transform.Rotation.x, 0.1f);
+      ImGui::DragFloat3("Scale", &transform.Scale.x, 0.1f);
+    }
+  } else {
+    ImGui::Text("No Entity Selected");
   }
 
   ImGui::End();
@@ -420,55 +318,54 @@ void EditorUI::DrawInspector() {
 void EditorUI::DrawContentBrowser() {
   ImGui::Begin("Content Browser");
 
-  static float padding = 16.0f;
-  static float thumbnailSize = 80.0f;
+  if (ImGui::BeginTabBar("ContentTabs")) {
+    if (ImGui::BeginTabItem("Assets")) {
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Console")) {
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("History")) {
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
 
-  // Top bar: Assets Console History
-  if (ImGui::Button("Assets")) {
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Console")) {
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("History")) {
-  }
-  ImGui::Separator();
+  float thumbnailSize = 64.0f;
+  float padding = 8.0f;
 
-  // Splitter
-  static float w1 = 150.0f;
-  // Use a simple tables approach for 2 columns
-  if (ImGui::BeginTable("ContentSplit", 2,
+  if (ImGui::BeginTable("ContentBrowserTable", 2,
                         ImGuiTableFlags_Resizable |
                             ImGuiTableFlags_BordersInnerV)) {
-    ImGui::TableSetupColumn("Folders", ImGuiTableColumnFlags_WidthFixed, w1);
-    ImGui::TableSetupColumn("Files", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Tree", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+    ImGui::TableSetupColumn("Grid", ImGuiTableColumnFlags_WidthStretch);
 
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
 
     // Tree
-    if (ImGui::TreeNodeEx("Assets", ImGuiTreeNodeFlags_DefaultOpen |
-                                        ImGuiTreeNodeFlags_OpenOnArrow)) {
-      ImGui::TreeNodeEx("Models", ImGuiTreeNodeFlags_Leaf |
-                                      ImGuiTreeNodeFlags_NoTreePushOnOpen);
-      ImGui::TreeNodeEx("Textures", ImGuiTreeNodeFlags_Leaf |
-                                        ImGuiTreeNodeFlags_NoTreePushOnOpen);
-      ImGui::TreeNodeEx("Materials", ImGuiTreeNodeFlags_Leaf |
-                                         ImGuiTreeNodeFlags_NoTreePushOnOpen);
-      ImGui::TreeNodeEx("Scripts", ImGuiTreeNodeFlags_Leaf |
-                                       ImGuiTreeNodeFlags_NoTreePushOnOpen);
-      ImGui::TreeNodeEx("Audio", ImGuiTreeNodeFlags_Leaf |
-                                     ImGuiTreeNodeFlags_NoTreePushOnOpen);
-      ImGui::TreeNodeEx("Prefabs", ImGuiTreeNodeFlags_Leaf |
-                                       ImGuiTreeNodeFlags_NoTreePushOnOpen);
+    if (ImGui::TreeNode("Assets")) {
+      ImGui::TreeNodeEx("Models", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
+      ImGui::TreeNodeEx("Textures", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
+      ImGui::TreeNodeEx("Materials", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
+      ImGui::TreeNodeEx("Scripts", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
+      ImGui::TreeNodeEx("Audio", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
+      ImGui::TreeNodeEx("Prefabs", ImGuiTreeNodeFlags_Leaf);
+      ImGui::TreePop();
       ImGui::TreePop();
     }
 
     ImGui::TableSetColumnIndex(1);
 
     // Grid
-    ImGui::InputTextWithHint("##AssetSearch", "Search...", new char[10],
-                             10); // Dummy
+    static char assetSearchBuf[64] = "";
+    ImGui::InputTextWithHint("##AssetSearch", "Search...", assetSearchBuf,
+                             IM_ARRAYSIZE(assetSearchBuf));
     ImGui::Separator();
 
     float cellSize = thumbnailSize + padding;
@@ -486,12 +383,12 @@ void EditorUI::DrawContentBrowser() {
         ImGui::TableNextColumn();
         ImGui::PushID(i);
 
-        // Icon (Color Button for now)
+        // Icon
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
         ImGui::Button("##Icon", ImVec2(thumbnailSize, thumbnailSize));
         ImGui::PopStyleColor();
 
-        // Drag Drop Source (Placeholder)
+        // Drag Drop Source
         if (ImGui::BeginDragDropSource()) {
           ImGui::SetDragDropPayload("CONTENT_BROWSER_ITEM", &i, sizeof(int));
           ImGui::EndDragDropSource();
@@ -514,45 +411,33 @@ void EditorUI::DrawViewport() {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
   ImGui::Begin("Viewport");
 
-  // Tabs (simulated)
-  if (ImGui::BeginTabBar("ViewportTabs")) {
-    if (ImGui::BeginTabItem("Scene")) {
-
-      ImVec2 viewportSize = ImGui::GetContentRegionAvail();
-
-      // Image will go here
-      // ImGui::Image(...);
-
-      // Overlay
-      ImGui::SetCursorPos(ImVec2(10, 30));
-      ImGui::BeginChild("Overlay", ImVec2(150, 60), true,
-                        ImGuiWindowFlags_NoTitleBar |
-                            ImGuiWindowFlags_NoScrollbar);
-      ImGui::Text("FPS: 60.0");
-      ImGui::Text("Tris: 1.2K");
-      ImGui::Text("Calls: 12");
-      ImGui::EndChild();
-
-      // Gizmo placeholder center
-      ImDrawList *draw_list = ImGui::GetWindowDrawList();
-      ImVec2 p = ImGui::GetCursorScreenPos();
-      p.x += viewportSize.x * 0.5f;
-      p.y += viewportSize.y * 0.5f;
-
-      // Simple Cube Wireframe hint
-      // draw_list->AddRect(ImVec2(p.x - 50, p.y - 50), ImVec2(p.x + 50, p.y +
-      // 50), IM_COL32(0, 255, 255, 255));
-
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Shaded")) {
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Wireframe")) {
-      ImGui::EndTabItem();
-    }
-    ImGui::EndTabBar();
+  // Resize Scene View RT if needed
+  ImVec2 viewportSize = ImGui::GetContentRegionAvail();
+  if (viewportSize.x > 0 && viewportSize.y > 0) {
+    m_SceneViewRenderer.Resize((int)viewportSize.x, (int)viewportSize.y);
   }
+
+  // Display Scene View RT as Image
+  if (m_SceneViewRenderer.IsValid()) {
+    ImGui::Image((ImTextureID)m_SceneViewRenderer.GetSRV().ptr, viewportSize);
+  }
+
+  // Input Isolation [GLOBAL RULE] - PHASE 3
+  if (ImGui::IsWindowHovered()) {
+    float wheel = ImGui::GetIO().MouseWheel;
+    if (wheel != 0.0f) {
+      m_EditorCamera.Zoom(wheel);
+    }
+  }
+
+  // Overlay
+  ImGui::SetCursorPos(ImVec2(10, 30));
+  ImGui::BeginChild("Overlay", ImVec2(180, 50), true,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+  ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+  ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "Zoom Dist: %.2f",
+                     m_EditorCamera.GetDistance());
+  ImGui::EndChild();
 
   ImGui::End();
   ImGui::PopStyleVar();

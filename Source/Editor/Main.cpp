@@ -8,10 +8,17 @@
 // Global Logging Setup
 void SetupLogging() {
   FILE *fp;
-  freopen_s(&fp, "debug_stdout.txt", "w", stdout);
-  freopen_s(&fp, "debug_stderr.txt", "w", stderr);
-  AllocConsole();
-  std::cout << "[System] Logging Initialized." << std::endl;
+  // Redirect stdout to log.txt (Overwrite mode)
+  freopen_s(&fp, "log.txt", "w", stdout);
+  // Redirect stderr to the same log.txt (Append mode)
+  freopen_s(&fp, "log.txt", "a", stderr);
+
+  // Set stdout to be unbuffered to ensure logs are written immediately during
+  // crashes
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+
+  std::cout << "[System] Logging Initialized in log.txt" << std::endl;
 }
 
 int RunGameLoop() {
@@ -44,6 +51,19 @@ int RunGameLoop() {
                      DXGI_FORMAT_R8G8B8A8_UNORM, renderer->GetSRVHeap(),
                      renderer->GetSRVDescriptorHandleStartCPU(),
                      renderer->GetSRVDescriptorHandleStartGPU());
+
+  // --- Step 1 Init: Create Scene and Entities ---
+  auto scene = std::make_shared<Forge::Scene>();
+
+  auto *cam = scene->CreateEntity("Main Camera");
+  auto *light = scene->CreateEntity("Directional Light");
+  auto *player = scene->CreateEntity("Player");
+  auto *model = scene->CreateEntity("Character Model");
+  model->SetParent(player);
+
+  editor->SetActiveScene(scene);
+  // ----------------------------------------------
+
   std::cout << "[Main] Editor UI Initialized." << std::endl;
 
   // 4. Main Loop
